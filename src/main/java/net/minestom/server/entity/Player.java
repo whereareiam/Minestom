@@ -152,11 +152,6 @@ public class Player extends LivingEntity implements CommandSender, HoverEventSou
     private GameMode gameMode;
     private WorldPos deathLocation;
 
-    /**
-     * Keeps track of what chunks are sent to the client, this defines the center of the loaded area
-     * in the range of {@link ServerFlag#CHUNK_VIEW_DISTANCE}
-     */
-    private Vec chunksLoadedByClient = Vec.ZERO;
     private final ReentrantLock chunkQueueLock = new ReentrantLock();
     private final LongPriorityQueue chunkQueue = new LongArrayPriorityQueue(this::compareChunkDistance);
     private boolean needsChunkPositionSync = true;
@@ -165,15 +160,9 @@ public class Player extends LivingEntity implements CommandSender, HoverEventSou
     private int maxChunkBatchLead = 1; // Maximum number of batches to send before waiting for a reply
     private int chunkBatchLead = 0; // Number of batches sent without a reply
 
-    final ChunkRange.ChunkConsumer chunkAdder = (chunkX, chunkZ) -> {
-        // Load new chunks
-        this.instance.loadOptionalChunk(chunkX, chunkZ).thenAccept(this::sendChunk);
-    };
-    final ChunkRange.ChunkConsumer chunkRemover = (chunkX, chunkZ) -> {
-        // Unload old chunks
-        sendPacket(new UnloadChunkPacket(chunkX, chunkZ));
-        EventDispatcher.call(new PlayerChunkUnloadEvent(this, chunkX, chunkZ));
-    };
+    // Direct calls to subscription manager (skip Instance wrapper for performance)
+    final ChunkRange.ChunkConsumer chunkAdder = (chunkX, chunkZ) -> instance.getChunkSubscriptions().subscribe(this, chunkX, chunkZ);
+    final ChunkRange.ChunkConsumer chunkRemover = (chunkX, chunkZ) -> instance.getChunkSubscriptions().unsubscribe(this, chunkX, chunkZ);
 
     private final AtomicInteger teleportId = new AtomicInteger();
     private int receivedTeleportId;
@@ -511,7 +500,6 @@ public class Player extends LivingEntity implements CommandSender, HoverEventSou
 
         // The client unloads chunks when respawning, so resend all chunks next to spawn
         ChunkRange.chunksInRange(respawnPosition, this.effectiveViewDistance(), chunkAdder);
-        chunksLoadedByClient = new Vec(respawnPosition.chunkX(), respawnPosition.chunkZ());
         // Client also needs all entities resent to them, since those are unloaded as well
         this.instance.getEntityTracker().nearbyEntitiesByChunkRange(respawnPosition, this.effectiveViewDistance(),
                 EntityTracker.Target.ENTITIES, entity -> {
@@ -583,11 +571,10 @@ public class Player extends LivingEntity implements CommandSender, HoverEventSou
                 }
             }
         }
-        final Pos position = this.position;
-        final int chunkX = position.chunkX();
-        final int chunkZ = position.chunkZ();
-        // Clear all viewable chunks
-        ChunkRange.chunksInRange(chunkX, chunkZ, this.effectiveViewDistance(), chunkRemover);
+        // Clear all chunk subscriptions
+        if (instance != null) {
+            instance.unsubscribeFromAllChunks(this);
+        }
         resetChunkQueue();
 
         // Remove from the tab-list
@@ -725,7 +712,6 @@ public class Player extends LivingEntity implements CommandSender, HoverEventSou
         if (updateChunks) {
             final int chunkX = spawnPosition.chunkX();
             final int chunkZ = spawnPosition.chunkZ();
-            chunksLoadedByClient = new Vec(chunkX, chunkZ);
             chunkUpdateLimitChecker.addToHistory(getChunk());
             sendPacket(new UpdateViewPositionPacket(chunkX, chunkZ));
 
@@ -783,6 +769,23 @@ public class Player extends LivingEntity implements CommandSender, HoverEventSou
         }
     }
 
+    /**
+     * Called by ChunkSubscriptionManager when a chunk is ready to be sent.
+     * Should only be called by ChunkSubscriptionManager.
+     */
+    public void onChunkReady(Chunk chunk) {
+        sendChunk(chunk);
+    }
+
+    /**
+     * Called by ChunkSubscriptionManager when a chunk is removed.
+     * Should only be called by ChunkSubscriptionManager.
+     */
+    public void onChunkRemoved(int chunkX, int chunkZ) {
+        sendPacket(new UnloadChunkPacket(chunkX, chunkZ));
+        EventDispatcher.call(new PlayerChunkUnloadEvent(this, chunkX, chunkZ));
+    }
+
     private void sendPendingChunks() {
         // If we have nothing to send or have sent the max # of batches without reply, do nothing
         if (chunkQueue.isEmpty() || chunkBatchLead >= maxChunkBatchLead) return;
@@ -791,12 +794,19 @@ public class Player extends LivingEntity implements CommandSender, HoverEventSou
         pendingChunkCount = Math.min(pendingChunkCount + targetChunksPerTick, ServerFlag.MAX_CHUNKS_PER_TICK);
         if (pendingChunkCount < 1) return; // Cant send anything
 
+        // Batch get subscriptions once (lock-free, no copies)
+        Set<Long> mySubscriptions = instance.getChunkSubscriptions().getPlayerSubscriptions(this);
+
         chunkQueueLock.lock();
         try {
             int batchSize = 0;
             sendPacket(new ChunkBatchStartPacket());
             while (!chunkQueue.isEmpty() && pendingChunkCount >= 1f) {
                 long chunkIndex = chunkQueue.dequeueLong();
+
+                // Fast subscription check (no lock, just set lookup)
+                if (!mySubscriptions.contains(chunkIndex)) continue;
+
                 int chunkX = CoordConversion.chunkIndexGetX(chunkIndex), chunkZ = CoordConversion.chunkIndexGetZ(chunkIndex);
                 var chunk = instance.getChunk(chunkX, chunkZ);
                 if (chunk == null || !chunk.isLoaded()) continue;
@@ -2344,11 +2354,9 @@ public class Player extends LivingEntity implements CommandSender, HoverEventSou
         if (chunkUpdateLimitChecker.addToHistory(newChunk)) {
             final int newX = newChunk.getChunkX();
             final int newZ = newChunk.getChunkZ();
-            final Vec old = chunksLoadedByClient;
             sendPacket(new UpdateViewPositionPacket(newX, newZ));
-            ChunkRange.chunksInRangeDiffering(newX, newZ, (int) old.x(), (int) old.z(),
-                    this.effectiveViewDistance(), chunkAdder, chunkRemover);
-            this.chunksLoadedByClient = new Vec(newX, newZ);
+
+            instance.getChunkSubscriptions().updateSubscriptions(this, newX, newZ, effectiveViewDistance());
         }
     }
 
@@ -2393,8 +2401,10 @@ public class Player extends LivingEntity implements CommandSender, HoverEventSou
         int chunkAZ = CoordConversion.chunkIndexGetZ(chunkIndexA);
         int chunkBX = CoordConversion.chunkIndexGetX(chunkIndexB);
         int chunkBZ = CoordConversion.chunkIndexGetZ(chunkIndexB);
-        int chunkDistanceA = Math.abs(chunkAX - chunksLoadedByClient.blockX()) + Math.abs(chunkAZ - chunksLoadedByClient.blockZ());
-        int chunkDistanceB = Math.abs(chunkBX - chunksLoadedByClient.blockX()) + Math.abs(chunkBZ - chunksLoadedByClient.blockZ());
+        int playerChunkX = position.chunkX();
+        int playerChunkZ = position.chunkZ();
+        int chunkDistanceA = Math.abs(chunkAX - playerChunkX) + Math.abs(chunkAZ - playerChunkZ);
+        int chunkDistanceB = Math.abs(chunkBX - playerChunkX) + Math.abs(chunkBZ - playerChunkZ);
         return Integer.compare(chunkDistanceA, chunkDistanceB);
     }
 

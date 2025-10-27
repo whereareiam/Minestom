@@ -6,7 +6,6 @@ import net.minestom.server.Viewable;
 import net.minestom.server.coordinate.ChunkRange;
 import net.minestom.server.coordinate.CoordConversion;
 import net.minestom.server.coordinate.Point;
-import net.minestom.server.coordinate.Vec;
 import net.minestom.server.entity.Entity;
 import net.minestom.server.entity.Player;
 import net.minestom.server.utils.validate.Check;
@@ -25,13 +24,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
-import static net.minestom.server.instance.Chunk.CHUNK_SIZE_X;
-import static net.minestom.server.instance.Chunk.CHUNK_SIZE_Z;
-
 final class EntityTrackerImpl implements EntityTracker {
     private static final Logger LOGGER = LoggerFactory.getLogger(EntityTrackerImpl.class);
 
     static final AtomicInteger TARGET_COUNTER = new AtomicInteger();
+
+    private final Instance instance;
 
     // Store all data associated to a Target
     // The array index is the Target enum ordinal
@@ -39,6 +37,10 @@ final class EntityTrackerImpl implements EntityTracker {
 
     private final Int2ObjectSyncMap<EntityTrackerEntry> entriesByEntityId = Int2ObjectSyncMap.hashmap();
     private final Map<UUID, EntityTrackerEntry> entriesByEntityUuid = new ConcurrentHashMap<>();
+
+    EntityTrackerImpl(Instance instance) {
+        this.instance = instance;
+    }
 
     @Override
     public <T extends Entity> void register(Entity entity, Point point,
@@ -289,17 +291,11 @@ final class EntityTrackerImpl implements EntityTracker {
     private final class ChunkView implements Viewable {
         private final ChunkViewKey key;
         private final int chunkX, chunkZ;
-        private final Point point;
-        final Set<Player> set = new SetImpl();
-        private int lastReferenceCount;
 
         private ChunkView(ChunkViewKey key) {
             this.key = key;
-
             this.chunkX = key.chunkX;
             this.chunkZ = key.chunkZ;
-
-            this.point = new Vec(CHUNK_SIZE_X * chunkX, 0, CHUNK_SIZE_Z * chunkZ);
         }
 
         @Override
@@ -314,50 +310,23 @@ final class EntityTrackerImpl implements EntityTracker {
 
         @Override
         public Set<Player> getViewers() {
-            return set;
-        }
+            // Directly delegate to subscription manager - no collection/iteration needed!
+            if (key.sharedInstances.isEmpty())
+                return instance.getChunkSubscriptions().getChunkSubscribers(chunkX, chunkZ);
 
-        private Collection<Player> references() {
-            Int2ObjectOpenHashMap<Player> entityMap = new Int2ObjectOpenHashMap<>(lastReferenceCount);
-            collectPlayers(EntityTrackerImpl.this, entityMap);
-            if (!key.sharedInstances.isEmpty()) {
-                for (SharedInstance instance : key.sharedInstances) {
-                    collectPlayers(instance.getEntityTracker(), entityMap);
-                }
-            }
-            this.lastReferenceCount = entityMap.size();
-            return entityMap.values();
-        }
+            // Complex case: merge main + shared instance subscribers
+            Int2ObjectOpenHashMap<Player> allViewers = new Int2ObjectOpenHashMap<>();
 
-        private void collectPlayers(EntityTracker tracker, Int2ObjectOpenHashMap<Player> map) {
-            // Check which players should be viewing this chunk based on their current position
-            for (Player player : tracker.entities(EntityTracker.Target.PLAYERS)) {
-                Chunk playerChunk = player.getChunk();
-                if (playerChunk == null) continue;
+            // Main instance subscribers
+            for (Player player : instance.getChunkSubscriptions().getChunkSubscribers(chunkX, chunkZ))
+                allViewers.put(player.getEntityId(), player);
 
-                if (ChunkRange.isWithinRange(chunkX, chunkZ,
-                        playerChunk.getChunkX(), playerChunk.getChunkZ(),
-                        player.effectiveViewDistance())) {
-                    map.putIfAbsent(player.getEntityId(), player);
-                }
-            }
-        }
+            // Shared instance subscribers
+            for (SharedInstance sharedInstance : key.sharedInstances)
+                for (Player player : sharedInstance.getChunkSubscriptions().getChunkSubscribers(chunkX, chunkZ))
+                    allViewers.putIfAbsent(player.getEntityId(), player);
 
-        final class SetImpl extends AbstractSet<Player> {
-            @Override
-            public Iterator<Player> iterator() {
-                return references().iterator();
-            }
-
-            @Override
-            public int size() {
-                return references().size();
-            }
-
-            @Override
-            public void forEach(Consumer<? super Player> action) {
-                references().forEach(action);
-            }
+            return Set.copyOf(allViewers.values());
         }
     }
 }

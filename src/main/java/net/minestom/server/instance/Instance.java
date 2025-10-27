@@ -115,7 +115,8 @@ public abstract class Instance implements Block.Getter, Block.Setter,
     // Field for tick events
     private long lastTickAge = TimeUnit.NANOSECONDS.toMillis(System.nanoTime());
 
-    private final EntityTracker entityTracker = new EntityTrackerImpl();
+    private final EntityTracker entityTracker = new EntityTrackerImpl(this);
+    private final ChunkSubscriptionManager chunkSubscriptions = new ChunkSubscriptionManager(this);
 
     private final ChunkCache blockRetriever = new ChunkCache(this, null, null);
 
@@ -779,6 +780,36 @@ public abstract class Instance implements Block.Getter, Block.Setter,
 
     public EntityTracker getEntityTracker() {
         return entityTracker;
+    }
+
+    public ChunkSubscriptionManager getChunkSubscriptions() {
+        return chunkSubscriptions;
+    }
+
+    /**
+     * Subscribe a player to a chunk. The chunk will be loaded if necessary,
+     * and the player will be notified when it's ready.
+     */
+    public void subscribeToChunk(Player player, int chunkX, int chunkZ) {
+        chunkSubscriptions.subscribe(player, chunkX, chunkZ);
+    }
+
+    /**
+     * Unsubscribe a player from a chunk.
+     */
+    public void unsubscribeFromChunk(Player player, int chunkX, int chunkZ) {
+        chunkSubscriptions.unsubscribe(player, chunkX, chunkZ);
+    }
+    
+    public boolean isSubscribedToChunk(Player player, int chunkX, int chunkZ) {
+        return chunkSubscriptions.isSubscribed(player, chunkX, chunkZ);
+    }
+
+    /**
+     * Unsubscribe a player from all chunks.
+     */
+    public void unsubscribeFromAllChunks(Player player) {
+        chunkSubscriptions.unsubscribeAll(player);
     }
 
     /**
