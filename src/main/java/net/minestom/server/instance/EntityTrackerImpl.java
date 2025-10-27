@@ -28,7 +28,7 @@ final class EntityTrackerImpl implements EntityTracker {
     private static final Logger LOGGER = LoggerFactory.getLogger(EntityTrackerImpl.class);
 
     static final AtomicInteger TARGET_COUNTER = new AtomicInteger();
-
+    
     private final Instance instance;
 
     // Store all data associated to a Target
@@ -37,8 +37,8 @@ final class EntityTrackerImpl implements EntityTracker {
 
     private final Int2ObjectSyncMap<EntityTrackerEntry> entriesByEntityId = Int2ObjectSyncMap.hashmap();
     private final Map<UUID, EntityTrackerEntry> entriesByEntityUuid = new ConcurrentHashMap<>();
-
-    EntityTrackerImpl(Instance instance) {
+    
+    EntityTrackerImpl(@Nullable Instance instance) {
         this.instance = instance;
     }
 
@@ -311,6 +311,8 @@ final class EntityTrackerImpl implements EntityTracker {
         @Override
         public Set<Player> getViewers() {
             // Directly delegate to subscription manager - no collection/iteration needed!
+            if (instance == null) return Set.of(); // Testing mode - no subscriptions available
+            
             if (key.sharedInstances.isEmpty())
                 return instance.getChunkSubscriptions().getChunkSubscribers(chunkX, chunkZ);
 
