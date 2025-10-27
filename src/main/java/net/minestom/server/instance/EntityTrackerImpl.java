@@ -330,8 +330,17 @@ final class EntityTrackerImpl implements EntityTracker {
         }
 
         private void collectPlayers(EntityTracker tracker, Int2ObjectOpenHashMap<Player> map) {
-            tracker.nearbyEntitiesByChunkRange(point, ServerFlag.CHUNK_VIEW_DISTANCE,
-                    EntityTracker.Target.PLAYERS, (player) -> map.putIfAbsent(player.getEntityId(), player));
+            // Check which players should be viewing this chunk based on their current position
+            for (Player player : tracker.entities(EntityTracker.Target.PLAYERS)) {
+                Chunk playerChunk = player.getChunk();
+                if (playerChunk == null) continue;
+
+                if (ChunkRange.isWithinRange(chunkX, chunkZ,
+                        playerChunk.getChunkX(), playerChunk.getChunkZ(),
+                        player.effectiveViewDistance())) {
+                    map.putIfAbsent(player.getEntityId(), player);
+                }
+            }
         }
 
         final class SetImpl extends AbstractSet<Player> {

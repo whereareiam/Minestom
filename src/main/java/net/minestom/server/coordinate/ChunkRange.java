@@ -75,6 +75,20 @@ public final class ChunkRange {
         chunksInRange(point.chunkX(), point.chunkZ(), range, consumer);
     }
 
+    /**
+     * Check if a chunk is within a given range of a center chunk (using Chebyshev distance).
+     *
+     * @param chunkX the chunk X to check
+     * @param chunkZ the chunk Z to check
+     * @param centerX the center chunk X
+     * @param centerZ the center chunk Z
+     * @param range the range in chunks
+     * @return true if the chunk is within range
+     */
+    public static boolean isWithinRange(int chunkX, int chunkZ, int centerX, int centerZ, int range) {
+        return Math.abs(chunkX - centerX) <= range && Math.abs(chunkZ - centerZ) <= range;
+    }
+
     @FunctionalInterface
     public interface ChunkConsumer {
         void accept(int chunkX, int chunkZ);
